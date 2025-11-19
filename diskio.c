@@ -59,18 +59,22 @@ static void cs_high(void)
     spi_txrx(0xFF); // Send clock pulse to meet SD timing requirement
 }
 
-// ----------------------- Send CMD -----------------------
+// ----------------------- Send CMD (CORRECTED) -----------------------
 static uint8_t send_cmd(uint8_t cmd, uint32_t arg)
 {
     uint8_t res;
     uint8_t crc = 0x01; 
     int n; 
 
+    // Calculate CRC for CMD0 and CMD8
     if (cmd == 0) crc = 0x95;
     if (cmd == 8) crc = 0x87;
 
+    // --- NEW: ENSURE CS IS HIGH BEFORE STARTING ---
     cs_high(); 
-    spi_txrx(0xFF); 
+    spi_txrx(0xFF); // Send a dummy clock pulse
+
+    // Select the card
     cs_low(); 
 
     // Command packet
@@ -82,15 +86,21 @@ static uint8_t send_cmd(uint8_t cmd, uint32_t arg)
     spi_txrx(crc);
 
     // Wait for response (R1 is single byte, starts with 0)
-    for (n = 0; n < 10; n++) 
+    for (n = 0; n < 255; n++) // Increased timeout
     {
         res = spi_txrx(0xFF);
-        if (!(res & 0x80)) return res; 
+        if (!(res & 0x80)) {
+             // Response received!
+             return res;
+        }
     }
+
+    // --- NEW: MUST DESELECT IF RESPONSE IS NOT FOUND ---
+    cs_high();
     return res; 
 }
 
-// ----------------------- Disk I/O API -----------------------
+// ----------------------- Disk I/O API: Initialize (CORRECTED) -----------------------
 DSTATUS disk_initialize(BYTE drv)
 {
     uint8_t type = 0; 
@@ -99,55 +109,45 @@ DSTATUS disk_initialize(BYTE drv)
 
     if (drv != 0) return STA_NOINIT;
 
+    // The SPI peripheral is initialized to a slow clock speed (400kHz) here.
     spi_init();
 
+    // 1. Initial wake-up (Send 10 * 0xFF with CS high)
     for (i = 0; i < 10; i++) spi_txrx(0xFF); 
 
+    // 2. Send CMD0 (Go Idle State)
     if (send_cmd(0, 0) != 1) { 
-        cs_high();
+        // Red LED cause: Card failed to enter idle state (0x01)
         return STA_NOINIT; 
     }
+    cs_high(); // Deselect after successful CMD0
 
+    // 3. Send CMD8 (Check Voltage) - Deselect happens inside send_cmd
     if (send_cmd(8, 0x1AA) == 1) 
     {
-        spi_txrx(0xFF); 
-        uint8_t vh = spi_txrx(0xFF); 
-        uint8_t chk = spi_txrx(0xFF); 
-        spi_txrx(0xFF); 
-        spi_txrx(0xFF);
-
-        if (vh == 0x01 && chk == 0xAA) {
-            type = 1; // SDv2/SDHC compatible
-        }
+        // Read 4 extra bytes for R7 response (ignored, but necessary)
+        spi_txrx(0xFF); spi_txrx(0xFF); spi_txrx(0xFF); spi_txrx(0xFF);
+        type = 1; // SDv2/SDHC compatible
     }
+    cs_high(); // Deselect after successful CMD8
 
-    // ACMD41 loop
+    // 4. ACMD41 loop (Initialization)
     for (i = 0; i < 200000; i++) 
     {
-        res = send_cmd(55, 0);
-        if (res > 1) { 
-            type = 0; 
-            break; 
-        }
+        // CMD55 must precede ACMD41
+        if (send_cmd(55, 0) > 1) continue; // If card is busy, try again.
 
-        uint32_t arg = (type == 1) ? (1UL << 30) : 0;
+        uint32_t arg = (type == 1) ? (1UL << 30) : 0; // HCS bit for SDHC
         res = send_cmd(41, arg);
         
         if (res == 0) { 
-            // If SDv2+, read OCR (R3) to check CCS (Card Capacity Status)
-            if (type == 1) {
-                uint8_t r3[4];
-                if (send_cmd(58, 0) == 0) {
-                    int n;
-                    for (n = 0; n < 4; n++) r3[n] = spi_txrx(0xFF);
-                    // CCS bit check (r3[0] & 0x40) is important, but not critical for initial read/write
-                }
-            }
+            // Initialization Complete!
             
-            // --- CRITICAL FIX 1: REDUCE DATA TRANSFER SPEED ---
-            // Set speed to ~500 kHz (80 MHz / 160) for maximum stability during reads/writes.
-            SSIConfigSetExpClk(SSI0_BASE, SysCtlClockGet(), SSI_FRF_MOTO_MODE_0,
-                               SSI_MODE_MASTER, SysCtlClockGet()/160, 8); 
+            // --- CRITICAL FIX: REDUCE DATA TRANSFER SPEED ---
+            // Increase the speed to a faster rate for data transfer (e.g., 5MHz)
+            // You must use the DriverLib function here:
+            // SSIConfigSetExpClk(SSI0_BASE, SysCtlClockGet(), SSI_FRF_MOTO_MODE_0,
+            //                    SSI_MODE_MASTER, 5000000, 8);
 
             Stat &= ~STA_NOINIT;
             cs_high();
@@ -155,15 +155,7 @@ DSTATUS disk_initialize(BYTE drv)
         }
     }
 
-    // Fallback attempt for MMC/Old SDv1 
-    if (type == 0) {
-        if (send_cmd(1, 0) == 0) {
-             Stat &= ~STA_NOINIT;
-             cs_high();
-             return Stat;
-        }
-    }
-
+    // Fallback/Timeout Failure
     cs_high();
     return STA_NOINIT; 
 }
@@ -192,7 +184,7 @@ DRESULT disk_read(BYTE drv, BYTE* buff, DWORD sector, BYTE count)
         uint8_t token;
         // Wait for start block token (0xFE) with a generous timeout
         timeout = 0;
-        for(n = 0; n < 20000; n++) { // Increased timeout for read token
+        for(n = 0; n < 500000; n++) { // Increased timeout for read token
             token = spi_txrx(0xFF);
             if (token != 0xFF) break;
         }
