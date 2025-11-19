@@ -5,6 +5,7 @@
 #include "driverlib/sysctl.h"
 #include "driverlib/gpio.h"
 #include "ff.h"
+#include "diskio.h"
 
 // ---------------- LED functions ----------------
 
@@ -70,7 +71,27 @@ int main(void)
                    SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
 
     LED_Init();
-    LED(1,0,0);   // RED: start
+    LED(1,1,1); // WHITE: Starting
+        Delay_ms(500);
+
+        // --- DIAGNOSTIC: Direct Hardware Check ---
+        // We force the low-level driver to initialize.
+        // If this fails, it is 100% a WIRING or POWER issue.
+        DSTATUS stat = disk_initialize(0);
+
+        if (stat & STA_NOINIT) {
+            // HARDWARE FAILURE
+            while(1) {
+                LED(1,0,0); // Blink RED fast
+                Delay_ms(100);
+                LED(0,0,0);
+                Delay_ms(100);
+            }
+        }
+
+        // Hardware is Good!
+        LED(0,0,1); // BLUE: Hardware OK
+        Delay_ms(500);
 
     // --- Stage 1: Mount SD ---
     if (f_mount(0, &fs) != FR_OK)
@@ -79,7 +100,7 @@ int main(void)
     }
 
     LED(0,1,0);   // GREEN: mounted
-    Delay_ms(500);
+    Delay_ms(50);
 
     // --- Stage 2: Create file ---
     if (f_open(&file, "test.txt", FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
