@@ -67,6 +67,8 @@ uint8_t buf[32];
 
 int main(void)
 {
+    char line[32];
+    UINT bw;
     SysCtlClockSet(SYSCTL_SYSDIV_2_5 | SYSCTL_USE_PLL |
                    SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
 
@@ -74,9 +76,7 @@ int main(void)
     LED(1,1,1); // WHITE: Starting
         Delay_ms(500);
 
-        // --- DIAGNOSTIC: Direct Hardware Check ---
-        // We force the low-level driver to initialize.
-        // If this fails, it is 100% a WIRING or POWER issue.
+
         DSTATUS stat = disk_initialize(0);
 
         if (stat & STA_NOINIT) {
@@ -100,7 +100,7 @@ int main(void)
     }
 
     LED(0,1,0);   // GREEN: mounted
-    Delay_ms(50);
+    Delay_ms(500);
 
     // --- Stage 2: Create file ---
     if (f_open(&file, "test.txt", FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
@@ -111,31 +111,40 @@ int main(void)
     LED(0,0,1);   // BLUE: file created
     Delay_ms(500);
 
+
     // --- Stage 3: Write ---
-    if (f_write(&file, "HELLO WORLD\n", 12, &bw) != FR_OK)
+    if (f_write(&file, "FIRST LINE\n", 11, &bw) != FR_OK)
     {
         while(1) LED(1,0,0);
     }
 
     f_close(&file);
 
+
+    // APPEND to file
+        f_open(&file, "test.txt", FA_WRITE | FA_OPEN_ALWAYS);  // open or create
+        f_lseek(&file, f_size(&file));                         // move to end of file
+        f_write(&file, "APPENDED LINE\n", 15, &bw);             // write new data
+        f_close(&file);
+
     LED(1,1,0);   // YELLOW: write done
-    Delay_ms(500);
 
-    // --- Stage 4: Read ---
-    if (f_open(&file, "test.txt", FA_READ) != FR_OK)
+    f_open(&file, "test.txt", FA_WRITE | FA_OPEN_ALWAYS);
+    int i;
+    for ( i = 1; i <= 10; i++)
     {
-        while(1) LED(1,0,0);
-    }
+        f_lseek(&file, f_size(&file));       // move pointer to end
 
-    if (f_read(&file, buf, 12, &br) != FR_OK)
-    {
-        while(1) LED(1,0,0);
-    }
+        // convert i into text
+        sprintf(line, "%d\n", i);
 
+        f_write(&file, line, strlen(line), &bw);
+    }
     f_close(&file);
 
     LED(1,0,1);   // PURPLE: read done
+
+
 
     while(1)
     {
